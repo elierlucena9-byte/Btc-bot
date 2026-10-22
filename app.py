@@ -1,191 +1,105 @@
-import threading
-import time
-import json
 import os
-import urllib.request
-import urllib.parse
-from flask import Flask, jsonify, render_template_string
+import time
+import threading
+import requests
+from flask import Flask
 
 app = Flask(__name__)
 
-# Configuración desde variables de entorno (Secrets)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT").strip().upper()
+# Configuración de Telegram
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-# Historial global para mostrar las señales en la página web
-signals_history = []
-bot_status = "Iniciando..."
+# Variable global para almacenar el precio actual de BTC
+latest_btc_price = "Cargando..."
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BTC Scalping & Telegram Bot Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0e11; color: #f0f6fc; margin: 0; padding: 20px; }
-        h1 { color: #58a6ff; font-size: 1.5rem; text-align: center; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
-        .signal-item { padding: 10px; margin: 5px 0; border-radius: 6px; font-size: 0.9rem; }
-        .long { background: rgba(46, 160, 67, 0.2); border-left: 4px solid #2ea043; }
-        .short { background: rgba(248, 81, 73, 0.2); border-left: 4px solid #f85149; }
-        .status { text-align: center; font-weight: bold; color: #3fb950; margin-bottom: 20px; }
-    </style>
-</head>
-<body>
-    <h1>🚀 BTC Scalping Bot & Terminal</h1>
-    <div class="status" id="bot-status">Estado: Conectando con el Bot...</div>
-    
-    <div class="card">
-        <h3>📊 Precio Actual de BTC</h3>
-        <h2 id="btc-price" style="text-align: center; color: #f0b90b;">Cargando...</h2>
-    </div>
-
-    <div class="card">
-        <h3>📡 Últimas Señales Enviadas a Telegram</h3>
-        <div id="signals-container">Cargando señales recientes...</div>
-    </div>
-
-    <script>
-        async function updateData() {
-            try {
-                let response = await fetch('/api/data');
-                let data = await response.json();
-                document.getElementById('btc-price').innerText = "$" + data.price.toLocaleString() + " USDT";
-                document.getElementById('bot-status').innerText = "Estado del Bot: " + data.status;
-                
-                let container = document.getElementById('signals-container');
-                if (data.signals.length === 0) {
-                    container.innerHTML = "<p>Esperando el primer impulso del mercado...</p>";
-                } else {
-                    container.innerHTML = data.signals.map(s => `
-                        <div class="signal-item ${s.type}">
-                            <strong>${s.title}</strong><br>
-                            Precio: <code>${s.price}</code> | Var: <code>${s.change}</code><br>
-                            <small>${s.time}</small>
-                        </div>
-                    `).join('');
-                }
-            } catch (e) {
-                console.error(e);
-            }
-        }
-        setInterval(updateData, 3000);
-        updateData();
-    </script>
-</body>
-</html>
-"""
-
-def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+def send_telegram_message(message):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("⚠️ Advertencia: No se han configurado TELEGRAM_TOKEN o CHAT_ID.")
         return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
+        requests.post(url, data=payload, timeout=5)
     except Exception as e:
-        print(f"Error enviando Telegram: {e}")
+        print(f"Error enviando mensaje a Telegram: {e}")
 
-latest_price = 0.0
-
-def trading_bot_loop():
-    global latest_price, bot_status
-    bot_status = "Activo y Monitoreando (1m, 5m, 15m)"
+def btc_scalping_bot():
+    global latest_btc_price
+    print("Bot de scalping de BTC iniciado...")
     
-    last_alert = {
-        "1m": {"up": 0, "down": 0},
-        "5m": {"up": 0, "down": 0},
-        "15m": {"up": 0, "down": 0}
-    }
-
+    # Enviar mensaje de bienvenida / prueba al iniciar
+    send_telegram_message("🟢 *¡Bot de Scalping BTC Iniciado!*\nMonitoreando Binance en tiempo real...")
+    
+    last_price = None
+    
     while True:
         try:
-            # Consultar precio actual
-            price_url = f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}"
-            res = urllib.request.urlopen(price_url, timeout=10)
-            latest_price = float(json.loads(res.read().decode("utf-8"))["price"])
-
-            # Consultar velas (1m, 5m, 15m)
-            def get_open(interval):
-                kline_url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit=1"
-                k_res = urllib.request.urlopen(kline_url, timeout=10)
-                return float(json.loads(k_res.read().decode("utf-8"))[0][1])
-
-            open_1m = get_open("1m")
-            open_5m = get_open("5m")
-            open_15m = get_open("15m")
-
-            c_1m = ((latest_price - open_1m) / open_1m) * 100
-            c_5m = ((latest_price - open_5m) / open_5m) * 100
-            c_15m = ((latest_price - open_15m) / open_15m) * 100
-
-            current_time = time.time()
-            readable_time = time.strftime('%H:%M:%S', time.localtime(current_time))
-
-            def register_signal(title, t_type, change_str):
-                msg = f"*{title}*\nPrecio: `{latest_price}` USDT\nVariación: `{change_str}`"
-                send_telegram(msg)
-                signals_history.insert(0, {
-                    "title": title,
-                    "type": t_type,
-                    "price": latest_price,
-                    "change": change_str,
-                    "time": readable_time
-                })
-                if len(signals_history) > 10: # Mantener solo las últimas 10
-                    signals_history.pop()
-
-            # 1M Scalping
-            if c_1m >= 0.05 and (current_time - last_alert["1m"]["up"] > 45):
-                register_signal("⚡ PROBABLE LONG - SCALPING RÁPIDO (1M)", "long", f"+{c_1m:.3f}%")
-                last_alert["1m"]["up"] = current_time
-            elif c_1m <= -0.05 and (current_time - last_alert["1m"]["down"] > 45):
-                register_signal("⚡ PROBABLE SHORT - SCALPING RÁPIDO (1M)", "short", f"{c_1m:.3f}%")
-                last_alert["1m"]["down"] = current_time
-
-            # 5M Scalping
-            if c_5m >= 0.12 and (current_time - last_alert["5m"]["up"] > 120):
-                register_signal("🚀 PROBABLE LONG - SCALPING 5M", "long", f"+{c_5m:.3f}%")
-                last_alert["5m"]["up"] = current_time
-            elif c_5m <= -0.12 and (current_time - last_alert["5m"]["down"] > 120):
-                register_signal("🔻 PROBABLE SHORT - SCALPING 5M", "short", f"{c_5m:.3f}%")
-                last_alert["5m"]["down"] = current_time
-
-            # 15M Tardío
-            if c_15m >= 0.25 and (current_time - last_alert["15m"]["up"] > 300):
-                register_signal("⏳ POSITIVO TARDÍO (LONG - 15M)", "long", f"+{c_15m:.3f}%")
-                last_alert["15m"]["up"] = current_time
-            elif c_15m <= -0.25 and (current_time - last_alert["15m"]["down"] > 300):
-                register_signal("⏳ POSITIVO TARDÍO (SHORT - 15M)", "short", f"{c_15m:.3f}%")
-                last_alert["15m"]["down"] = current_time
-
+            # Obtener precio actual de Binance (API Pública)
+            res = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                current_price = float(data["price"])
+                latest_btc_price = f"${current_price:,.2f} USDT"
+                
+                if last_price is not None:
+                    change = ((current_price - last_price) / last_price) * 100
+                    # Alerta si hay cambio >= 0.05%
+                    if abs(change) >= 0.05:
+                        direction = "🚀 Subida detectada" if change > 0 else "⚠️ Bajada detectada"
+                        msg = f"*{direction} en BTCUSDT*\nPrecio: `${current_price:,.2f}`\nVariación: `{change:.2f}%`"
+                        send_telegram_message(msg)
+                        last_price = current_price
+                else:
+                    last_price = current_price
+            else:
+                print(f"Error HTTP Binance: {res.status_code}")
+                
         except Exception as e:
-            print(f"Error en el bucle del bot: {e}")
+            print(f"Error consultando Binance: {e}")
+            
+        time.sleep(15)  # Consulta cada 15 segundos
 
-        time.sleep(10)
+@app.route("/")
+def home():
+    global latest_btc_price
+    return f"""
+    <!DOCTYPE html>
+    <html lang="es">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>BTC Scalping Bot</title>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0e14; color: #f8fafc; text-align: center; padding: 30px 15px; margin: 0; }}
+                .card {{ background: #151d2a; max-width: 420px; margin: 0 auto; padding: 25px; border-radius: 16px; border: 1px solid #1e293b; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }}
+                h1 {{ color: #38bdf8; font-size: 22px; margin-bottom: 20px; }}
+                .price-box {{ background: #0f172a; padding: 20px; border-radius: 12px; margin: 15px 0; border: 1px solid #334155; }}
+                .price {{ font-size: 28px; font-weight: bold; color: #f59e0b; }}
+                .status {{ color: #22c55e; font-weight: bold; display: inline-block; margin-bottom: 10px; }}
+                p {{ color: #94a3b8; font-size: 14px; line-height: 1.5; }}
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>🚀 BTC Scalping Bot & Terminal</h1>
+                <div class="status">● Bot Activo y Monitoreando</div>
+                <div class="price-box">
+                    <p style="margin:0 0 5px 0; color:#64748b;">Precio Actual de BTC</p>
+                    <div class="price">{latest_btc_price}</div>
+                </div>
+                <p>Las alertas de volatilidad se enviarán automáticamente a tu Telegram.</p>
+            </div>
+        </body>
+    </html>
+    """
 
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/data')
-def api_data():
-    return jsonify({
-        "price": latest_price,
-        "status": bot_status,
-        "signals": signals_history
-    })
-
-if __name__ == '__main__':
-    # Iniciar el bot de trading en un hilo secundario (background thread)
-    t = threading.Thread(target=trading_bot_loop, daemon=True)
-    t.start()
+if __name__ == "__main__":
+    # Iniciar bot en segundo plano
+    bot_thread = threading.Thread(target=btc_scalping_bot, daemon=True)
+    bot_thread.start()
     
-    # Iniciar el servidor web Flask
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    # Iniciar servidor Flask
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
